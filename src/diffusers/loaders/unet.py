@@ -774,20 +774,30 @@ class UNet2DConditionLoadersMixin:
                     heads=heads,
                     id_embeddings_dim=id_embeddings_dim,
                 )
-
+            print(state_dict.keys())
             for key, value in state_dict.items():
                 diffusers_name = key.replace("perceiver_resampler.", "")
-                diffusers_name = diffusers_name.replace("0.to", "2.to")
-                diffusers_name = diffusers_name.replace("0.1.0.", "0.3.0.")
-                diffusers_name = diffusers_name.replace("0.1.1.", "0.3.1.")
-                diffusers_name = diffusers_name.replace("1.1.0.", "1.3.0.")
-                diffusers_name = diffusers_name.replace("1.1.1.", "1.3.1.")
-                diffusers_name = diffusers_name.replace("2.1.0.", "2.3.0.")
-                diffusers_name = diffusers_name.replace("2.1.1.", "2.3.1.")
-                diffusers_name = diffusers_name.replace("3.1.0.", "3.3.0.")
-                diffusers_name = diffusers_name.replace("3.1.1.", "3.3.1.")
-                diffusers_name = diffusers_name.replace(".3.1.weight", ".3.1.net.0.proj.weight")
-                diffusers_name = diffusers_name.replace(".1.3.weight", ".3.1.net.2.weight")
+                diffusers_name = diffusers_name.replace("0.to", "attn.to")
+                diffusers_name = diffusers_name.replace("0.1.0.", "0.ff.0.")
+                diffusers_name = diffusers_name.replace("0.1.1.weight", "0.ff.1.net.0.proj.weight")
+                diffusers_name = diffusers_name.replace("0.1.3.weight", "0.ff.1.net.2.weight")
+                diffusers_name = diffusers_name.replace("1.1.0.", "1.ff.0.")
+                diffusers_name = diffusers_name.replace("1.1.1.weight", "1.ff.1.net.0.proj.weight")
+                diffusers_name = diffusers_name.replace("1.1.3.weight", "1.ff.1.net.2.weight")
+                diffusers_name = diffusers_name.replace("2.1.0.", "2.ff.0.")
+                diffusers_name = diffusers_name.replace("2.1.1.weight", "2.ff.1.net.0.proj.weight")
+                diffusers_name = diffusers_name.replace("2.1.3.weight", "2.ff.1.net.2.weight")
+                diffusers_name = diffusers_name.replace("3.1.0.", "3.ff.0.")
+                diffusers_name = diffusers_name.replace("3.1.1.weight", "3.ff.1.net.0.proj.weight")
+                diffusers_name = diffusers_name.replace("3.1.3.weight", "3.ff.1.net.2.weight")
+                diffusers_name = diffusers_name.replace("layers.0.0", "layers.0.ln0")
+                diffusers_name = diffusers_name.replace("layers.0.1", "layers.0.ln1")
+                diffusers_name = diffusers_name.replace("layers.1.0", "layers.1.ln0")
+                diffusers_name = diffusers_name.replace("layers.1.1", "layers.1.ln1")
+                diffusers_name = diffusers_name.replace("layers.2.0", "layers.2.ln0")
+                diffusers_name = diffusers_name.replace("layers.2.1", "layers.2.ln1")
+                diffusers_name = diffusers_name.replace("layers.3.0", "layers.3.ln0")
+                diffusers_name = diffusers_name.replace("layers.3.1", "layers.3.ln1")
 
                 if "norm1" in diffusers_name:
                     updated_state_dict[diffusers_name.replace("0.norm1", "0")] = value
@@ -809,6 +819,8 @@ class UNet2DConditionLoadersMixin:
                     updated_state_dict["proj.net.2.bias"] = value
                 else:
                     updated_state_dict[diffusers_name] = value
+            print(updated_state_dict.keys())
+            print(image_projection.state_dict().keys())
 
         elif "norm.weight" in state_dict:
             # IP-Adapter Face ID
@@ -968,6 +980,32 @@ class UNet2DConditionLoadersMixin:
 
                 key_id += 2
 
+        return attn_procs
+
+    def _load_ip_adapter_weights(self, state_dicts, low_cpu_mem_usage=False):
+        if not isinstance(state_dicts, list):
+            state_dicts = [state_dicts]
+        # Set encoder_hid_proj after loading ip_adapter weights,
+        # because `IPAdapterPlusImageProjection` also has `attn_processors`.
+        self.encoder_hid_proj = None
+
+        attn_procs = self._convert_ip_adapter_attn_to_diffusers(state_dicts, low_cpu_mem_usage=low_cpu_mem_usage)
+        self.set_attn_processor(attn_procs)
+
+        # convert IP-Adapter Image Projection layers to diffusers
+        image_projection_layers = []
+        for state_dict in state_dicts:
+            image_projection_layer = self._convert_ip_adapter_image_proj_to_diffusers(
+                state_dict["image_proj"], low_cpu_mem_usage=low_cpu_mem_usage
+            )
+            image_projection_layers.append(image_projection_layer)
+
+        self.encoder_hid_proj = MultiIPAdapterImageProjection(image_projection_layers)
+        self.config.encoder_hid_dim_type = "ip_image_proj"
+
+        self.to(dtype=self.dtype, device=self.device)
+
+    def _load_ip_adapter_loras(self, state_dicts):
         lora_dicts = {}
         for key_id, name in enumerate(self.attn_processors.keys()):
             for i, state_dict in enumerate(state_dicts):
@@ -1018,35 +1056,7 @@ class UNet2DConditionLoadersMixin:
                             ]
                         }
                     )
-
-        return attn_procs, lora_dicts
-
-    def _load_ip_adapter_weights(self, state_dicts, low_cpu_mem_usage=False):
-        if not isinstance(state_dicts, list):
-            state_dicts = [state_dicts]
-        # Set encoder_hid_proj after loading ip_adapter weights,
-        # because `IPAdapterPlusImageProjection` also has `attn_processors`.
-        self.encoder_hid_proj = None
-
-        attn_procs, lora_dict = self._convert_ip_adapter_attn_to_diffusers(
-            state_dicts, low_cpu_mem_usage=low_cpu_mem_usage
-        )
-        self.set_attn_processor(attn_procs)
-
-        # convert IP-Adapter Image Projection layers to diffusers
-        image_projection_layers = []
-        for state_dict in state_dicts:
-            image_projection_layer = self._convert_ip_adapter_image_proj_to_diffusers(
-                state_dict["image_proj"], low_cpu_mem_usage=low_cpu_mem_usage
-            )
-            image_projection_layers.append(image_projection_layer)
-
-        self.encoder_hid_proj = MultiIPAdapterImageProjection(image_projection_layers)
-        self.config.encoder_hid_dim_type = "ip_image_proj"
-
-        self.to(dtype=self.dtype, device=self.device)
-
-        return lora_dict
+        return lora_dicts
 
 
 class FromOriginalUNetMixin:
